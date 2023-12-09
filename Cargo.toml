@@ -7,7 +7,8 @@ edition = "2021"
 
 [dependencies]
 websocket = "0.27.0"
-json = "0.12.4"
+serde = {version = "1.0.193", features = ["derive"]}
+serde_json = "1.0.108"
 
 [lib]
 crate-type = ["dylib"]
