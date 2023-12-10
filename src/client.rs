@@ -128,7 +128,6 @@ impl DDPClient {
                     }
                     _ => {
                         println!("invalid message: {:?}", message);
-                        return;
                     }
                 }
             }
@@ -194,7 +193,6 @@ impl DDPClient {
                     return;
                 }
                 let _ = pong_event_alive.wait_timeout(&ping_id.to_string()[..], Duration::from_millis(1000)).unwrap();
-                println!(">>>>pong ok");
                 thread::sleep(Duration::from_millis(1000));
             }
         });
@@ -232,5 +230,9 @@ impl DDPClient {
             }
         };
         return Ok(msg);
+    }
+
+    pub fn is_alive(&self) -> bool {
+        return self.alive.load(Ordering::SeqCst);
     }
 }
