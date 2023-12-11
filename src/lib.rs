@@ -1,6 +1,6 @@
 
 mod message;
 mod event;
-mod client;
-mod error;
+pub mod client;
+pub mod error;
 

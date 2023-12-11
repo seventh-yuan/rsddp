@@ -5,6 +5,7 @@ use std::vec::Vec;
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "msg")]
+#[serde(rename_all = "camelCase")]
 pub enum ClientMessage {
     Connect {
         session: String,
@@ -34,6 +35,7 @@ pub enum ClientMessage {
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "msg")]
+#[serde(rename_all = "camelCase")]
 pub enum ServerMessage {
     Connected {
         session: String,

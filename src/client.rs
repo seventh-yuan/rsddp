@@ -179,11 +179,11 @@ impl DDPClient {
         }
     }
 
-    pub fn call(&mut self, method: String, params: Value, timeout: Duration) -> Result<Option<Value>, DDPError> {
+    pub fn call(&mut self, method: &str, params: Value, timeout: Duration) -> Result<Option<Value>, DDPError> {
         let method_id = self.method_id.to_string();
         self.method_id += 1;
         let message = ClientMessage::Method {
-            method: method,
+            method: method.to_string(),
             params: Some(params),
             id: method_id.clone(),
             randomSeed: Some(Value::String("0".to_string())),
