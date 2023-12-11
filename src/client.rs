@@ -1,7 +1,7 @@
 use websocket::client::ClientBuilder;
 use websocket as ws;
 use std::sync::mpsc;
-use std::sync::mpsc::Sender;
+use websocket::stream::sync::TcpStream;
 use std::thread::JoinHandle;
 use std::vec::Vec;
 use std::sync::{Arc};
@@ -15,7 +15,7 @@ use crate::error::DDPError;
 
 
 pub struct DDPClient {
-    ws_tx: Sender<ws::OwnedMessage>,
+    ws_tx: mpsc::Sender<ws::OwnedMessage>,
     threads: Vec<JoinHandle<()>>,
     conn_event: Arc<Event<ServerMessage>>,
     pong_event: Arc<Event<ServerMessage>>,
@@ -48,100 +48,25 @@ impl DDPClient {
         let alive_ws_tx = ws_tx.clone();
         let mut threads = Vec::new();
         let conn_event = Arc::new(Event::<ServerMessage>::new());
-        let conn_event_clone = conn_event.clone();
         let pong_event = Arc::new(Event::<ServerMessage>::new());
-        let pong_event_clone = pong_event.clone();
         let pong_event_alive = pong_event.clone();
         let sub_event = Arc::new(Event::<ServerMessage>::new());
         let sub_event_clone = sub_event.clone();
         let result_event = Arc::new(Event::<ServerMessage>::new());
-        let result_event_clone = result_event.clone();
         let updated_event = Arc::new(Event::<ServerMessage>::new());
         let updated_event_clone = updated_event.clone();
-        let send_th = thread::spawn(move || {
-            loop {
-                let message = match ws_rx.recv() {
-                    Ok(m) => m,
-                    Err(e) => {
-                        println!("send loop: {:?}", e);
-                        return;
-                    }
-                };
-                match message {
-                    ws::OwnedMessage::Close(_) => {
-                        let _ = sender.send_message(&message);
-                        return;
-                    }
-                    _ => {
-                        sender.send_message(&message).unwrap();
-                    }
-                }
-
-            }
-        });
+        let send_th = DDPClient::ws_send_loop(ws_rx, sender);
         threads.push(send_th);
-        let recv_th = thread::spawn(move || {
-            for message in receiver.incoming_messages() {
-                let message = match message {
-                    Ok(m) => m,
-                    Err(e) => {
-                        println!("Receive loop: {:?}", e);
-                        let _ = ws_tx.send(ws::OwnedMessage::Close(None));
-                        return;
-                    }
-                };
-                let message: ServerMessage = match message {
-                    ws::OwnedMessage::Text(m) => serde_json::from_str(&m[..]).unwrap(),
-                    ws::OwnedMessage::Close(_) => {
-                        let _ = ws_tx.send(ws::OwnedMessage::Close(None));
-                        return;
-                    }
-                    ws::OwnedMessage::Ping(data) => {
-                        match ws_tx.send(ws::OwnedMessage::Pong(data)) {
-                            Ok(()) => (),
-                            Err(e) => {
-                                println!("Recevie loop: {:?}", e);
-                                return;
-                            }
-                        };
-                        return;
-                    }
-                    _ => {
-                        println!("invalid message: {:?}", message);
-                        return;
-                    }
-                };
-                match message {
-                    ServerMessage::Connected {session} => {
-                        conn_event.notify("".to_string(), ServerMessage::Connected {session: session});
-                    }
-                    ServerMessage::Failed {version} => {
-                        conn_event.notify("".to_string(), ServerMessage::Failed {version: version});
-                    }
-                    ServerMessage::Result {id, error, result} => {
-                        result_event.notify(id.to_string(), ServerMessage::Result {id: id, error: error, result});
-                    }
-                    ServerMessage::Pong {id} => {
-                        let id = id.unwrap();
-                        pong_event.notify(id.to_string(), ServerMessage::Pong {id: Some(id)});
-
-                    }
-                    _ => {
-                        println!("invalid message: {:?}", message);
-                    }
-                }
-            }
-
-        });
+        let recv_th = DDPClient::ws_recv_loop(receiver, ws_tx.clone(), conn_event.clone(), result_event.clone(), pong_event.clone());
         threads.push(recv_th);
         let is_alive = Arc::new(AtomicBool::new(true));
         let mut client = Self {
-            ws_tx: ws_tx_clone,
+            ws_tx: ws_tx,
             threads: threads,
-            conn_event: conn_event_clone,
-            pong_event: pong_event_clone,
+            conn_event: conn_event,
+            pong_event: pong_event,
             sub_event: sub_event_clone,
-            result_event: result_event_clone,
+            result_event: result_event,
             updated_event: updated_event_clone,
             session: "".to_string(),
             method_id: 0,
@@ -205,6 +130,90 @@ impl DDPClient {
             Ok(()) => Ok(()),
             Err(_) => Err(DDPError::SendFailed("send message failed".to_string()))
         }
+    }
+
+    fn ws_send_loop(ws_rx_chan: mpsc::Receiver<ws::OwnedMessage>, mut ws_sender: ws::sender::Writer<TcpStream>) -> JoinHandle<()> {
+        thread::spawn(move || {
+            loop {
+                let message = match ws_rx_chan.recv() {
+                    Ok(m) => m,
+                    Err(e) => {
+                        println!("send loop: {:?}", e);
+                        return;
+                    }
+                };
+                match message {
+                    ws::OwnedMessage::Close(_) => {
+                        let _ = ws_sender.send_message(&message);
+                        return;
+                    }
+                    _ => {
+                        ws_sender.send_message(&message).unwrap();
+                    }
+                }
+
+            }
+        })
+    }
+
+    fn ws_recv_loop(mut ws_recver: ws::receiver::Reader<TcpStream>,
+                    mut ws_tx_chan: mpsc::Sender<ws::OwnedMessage>,
+                    conn_event: Arc<Event<ServerMessage>>,
+                    result_event: Arc<Event<ServerMessage>>,
+                    pong_event: Arc<Event<ServerMessage>>) -> JoinHandle<()> {
+        thread::spawn(move || {
+            for message in ws_recver.incoming_messages() {
+                let message = match message {
+                    Ok(m) => m,
+                    Err(e) => {
+                        println!("Receive loop: {:?}", e);
+                        let _ = ws_tx_chan.send(ws::OwnedMessage::Close(None));
+                        return;
+                    }
+                };
+                let message: ServerMessage = match message {
+                    ws::OwnedMessage::Text(m) => serde_json::from_str(&m[..]).unwrap(),
+                    ws::OwnedMessage::Close(_) => {
+                        let _ = ws_tx_chan.send(ws::OwnedMessage::Close(None));
+                        return;
+                    }
+                    ws::OwnedMessage::Ping(data) => {
+                        match ws_tx_chan.send(ws::OwnedMessage::Pong(data)) {
+                            Ok(()) => (),
+                            Err(e) => {
+                                println!("Recevie loop: {:?}", e);
+                                return;
+                            }
+                        };
+                        return;
+                    }
+                    _ => {
+                        println!("invalid message: {:?}", message);
+                        return;
+                    }
+                };
+                match message {
+                    ServerMessage::Connected {session} => {
+                        conn_event.notify("".to_string(), ServerMessage::Connected {session: session});
+                    }
+                    ServerMessage::Failed {version} => {
+                        conn_event.notify("".to_string(), ServerMessage::Failed {version: version});
+                    }
+                    ServerMessage::Result {id, error, result} => {
+                        result_event.notify(id.to_string(), ServerMessage::Result {id: id, error: error, result});
+                    }
+                    ServerMessage::Pong {id} => {
+                        let id = id.unwrap();
+                        pong_event.notify(id.to_string(), ServerMessage::Pong {id: Some(id)});
+
+                    }
+                    _ => {
+                        println!("invalid message: {:?}", message);
+                    }
+                }
+            }
+
+        })
     }
 
     pub fn call(&mut self, method: &str, params: Value, timeout: Duration) -> Result<Option<Value>, DDPError> {
