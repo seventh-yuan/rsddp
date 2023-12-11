@@ -7,6 +7,7 @@ use std::vec::Vec;
 use std::sync::{Arc};
 use std::time::{Duration, Instant};
 use std::thread::{self, spawn, sleep};
+use std::sync::atomic::{AtomicBool, Ordering};
 use serde_json::Value;
 use crate::event::Event;
 use crate::message::{ServerMessage, ClientMessage};
@@ -23,10 +24,12 @@ pub struct DDPClient {
     updated_event: Arc<Event<ServerMessage>>,
     session: String,
     method_id: u32,
+    alive: Arc<AtomicBool>,
 }
 
 impl Drop for DDPClient {
     fn drop(&mut self) {
+        self.alive.store(false, Ordering::SeqCst);
         self.send_message(ws::OwnedMessage::Close(None));
         while let Some(th) = self.threads.pop() {
             th.join().unwrap();
@@ -42,11 +45,13 @@ impl DDPClient {
         let (ws_tx, ws_rx) = mpsc::channel();
 
         let ws_tx_clone = ws_tx.clone();
+        let alive_ws_tx = ws_tx.clone();
         let mut threads = Vec::new();
         let conn_event = Arc::new(Event::<ServerMessage>::new());
         let conn_event_clone = conn_event.clone();
         let pong_event = Arc::new(Event::<ServerMessage>::new());
         let pong_event_clone = pong_event.clone();
+        let pong_event_alive = pong_event.clone();
         let sub_event = Arc::new(Event::<ServerMessage>::new());
         let sub_event_clone = sub_event.clone();
         let result_event = Arc::new(Event::<ServerMessage>::new());
@@ -116,6 +121,11 @@ impl DDPClient {
                     ServerMessage::Result {id, error, result} => {
                         result_event.notify(id.to_string(), ServerMessage::Result {id: id, error: error, result});
                     }
+                    ServerMessage::Pong {id} => {
+                        let id = id.unwrap();
+                        pong_event.notify(id.to_string(), ServerMessage::Pong {id: Some(id)});
+
+                    }
                     _ => {
                         println!("invalid message: {:?}", message);
                         return;
@@ -125,6 +135,7 @@ impl DDPClient {
 
         });
         threads.push(recv_th);
+        let is_alive = Arc::new(AtomicBool::new(true));
         let mut client = Self {
             ws_tx: ws_tx_clone,
             threads: threads,
@@ -135,6 +146,7 @@ impl DDPClient {
             updated_event: updated_event_clone,
             session: "".to_string(),
             method_id: 0,
+            alive: is_alive.clone(),
         };
 
         let ddp_versions: Vec<String> = vec!["1".to_string(), "pre2".to_string(), "pre1".to_string()]; 
@@ -169,6 +181,24 @@ impl DDPClient {
                 }
             }
         }
+
+        let alive_th = thread::spawn(move || {
+            let mut ping_id = 0;
+            loop {
+                if !is_alive.load(Ordering::SeqCst) {
+                    return;
+                }
+                let ping_msg = ClientMessage::Ping {id: Some(ping_id.to_string())};
+                if let Err(_) = alive_ws_tx.send(ws::OwnedMessage::Text(serde_json::to_string(&ping_msg).unwrap())) {
+                    is_alive.store(false, Ordering::SeqCst);
+                    return;
+                }
+                let _ = pong_event_alive.wait_timeout(&ping_id.to_string()[..], Duration::from_millis(1000)).unwrap();
+                println!(">>>>pong ok");
+                thread::sleep(Duration::from_millis(1000));
+            }
+        });
+        client.threads.push(alive_th);
         return Ok(client);
     }
 
