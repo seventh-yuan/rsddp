@@ -44,7 +44,6 @@ impl DDPClient {
 
         let (ws_tx, ws_rx) = mpsc::channel();
 
-        let ws_tx_clone = ws_tx.clone();
         let alive_ws_tx = ws_tx.clone();
         let mut threads = Vec::new();
         let conn_event = Arc::new(Event::<ServerMessage>::new());
@@ -106,21 +105,7 @@ impl DDPClient {
             }
         }
 
-        let alive_th = thread::spawn(move || {
-            let mut ping_id = 0;
-            loop {
-                if !is_alive.load(Ordering::SeqCst) {
-                    return;
-                }
-                let ping_msg = ClientMessage::Ping {id: Some(ping_id.to_string())};
-                if let Err(_) = alive_ws_tx.send(ws::OwnedMessage::Text(serde_json::to_string(&ping_msg).unwrap())) {
-                    is_alive.store(false, Ordering::SeqCst);
-                    return;
-                }
-                let _ = pong_event_alive.wait_timeout(&ping_id.to_string()[..], Duration::from_millis(1000)).unwrap();
-                thread::sleep(Duration::from_millis(1000));
-            }
-        });
+        let alive_th = DDPClient::alive_loop(is_alive, alive_ws_tx, pong_event_alive);
         client.threads.push(alive_th);
         return Ok(client);
     }
@@ -213,6 +198,24 @@ impl DDPClient {
                 }
             }
 
+        })
+    }
+
+    fn alive_loop(alive: Arc<AtomicBool>, ws_tx_chan: mpsc::Sender<ws::OwnedMessage>, pong_event: Arc<Event<ServerMessage>>) -> JoinHandle<()> {
+        thread::spawn(move || {
+            let mut ping_id = 0;
+            loop {
+                if !alive.load(Ordering::SeqCst) {
+                    return;
+                }
+                let ping_msg = ClientMessage::Ping {id: Some(ping_id.to_string())};
+                if let Err(_) = ws_tx_chan.send(ws::OwnedMessage::Text(serde_json::to_string(&ping_msg).unwrap())) {
+                    alive.store(false, Ordering::SeqCst);
+                    return;
+                }
+                let _ = pong_event.wait_timeout(&ping_id.to_string()[..], Duration::from_millis(1000)).unwrap();
+                thread::sleep(Duration::from_millis(1000));
+            }
         })
     }
 
