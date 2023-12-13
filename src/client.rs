@@ -4,15 +4,22 @@ use std::sync::mpsc;
 use websocket::stream::sync::TcpStream;
 use std::thread::JoinHandle;
 use std::vec::Vec;
-use std::sync::{Arc};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::thread::{self, spawn, sleep};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
 use serde_json::Value;
 use crate::event::Event;
 use crate::message::{ServerMessage, ClientMessage};
 use crate::error::DDPError;
 
+
+struct SubScription {
+    on_added: Option<fn(Value)>,
+    on_changed: Option<fn(Value)>,
+    on_removed: Option<fn(Value)>,
+}
 
 pub struct DDPClient {
     ws_tx: mpsc::Sender<ws::OwnedMessage>,
@@ -25,6 +32,7 @@ pub struct DDPClient {
     session: String,
     method_id: u32,
     alive: Arc<AtomicBool>,
+    subs: Arc<Mutex<HashMap<String, SubScription>>>,
 }
 
 impl Drop for DDPClient {
@@ -54,9 +62,10 @@ impl DDPClient {
         let result_event = Arc::new(Event::<ServerMessage>::new());
         let updated_event = Arc::new(Event::<ServerMessage>::new());
         let updated_event_clone = updated_event.clone();
+        let subs = Arc::new(Mutex::new(HashMap::new()));
         let send_th = DDPClient::ws_send_loop(ws_rx, sender);
         threads.push(send_th);
-        let recv_th = DDPClient::ws_recv_loop(receiver, ws_tx.clone(), conn_event.clone(), result_event.clone(), pong_event.clone());
+        let recv_th = DDPClient::ws_recv_loop(receiver, ws_tx.clone(), conn_event.clone(), result_event.clone(), pong_event.clone(), subs.clone());
         threads.push(recv_th);
         let is_alive = Arc::new(AtomicBool::new(true));
         let mut client = Self {
@@ -70,6 +79,7 @@ impl DDPClient {
             session: "".to_string(),
             method_id: 0,
             alive: is_alive.clone(),
+            subs: subs,
         };
 
         let ddp_versions: Vec<String> = vec!["1".to_string(), "pre2".to_string(), "pre1".to_string()]; 
@@ -145,7 +155,8 @@ impl DDPClient {
                     mut ws_tx_chan: mpsc::Sender<ws::OwnedMessage>,
                     conn_event: Arc<Event<ServerMessage>>,
                     result_event: Arc<Event<ServerMessage>>,
-                    pong_event: Arc<Event<ServerMessage>>) -> JoinHandle<()> {
+                    pong_event: Arc<Event<ServerMessage>>,
+                    subs: Arc<Mutex<SubScription>>) -> JoinHandle<()> {
         thread::spawn(move || {
             for message in ws_recver.incoming_messages() {
                 let message = match message {
@@ -217,6 +228,15 @@ impl DDPClient {
                 thread::sleep(Duration::from_millis(1000));
             }
         })
+    }
+
+    pub fn subscribe(&mut self, name: String, on_added: Option<fn(Value)>, on_changed: Option<fn(Value)>, on_removed: Option<fn(Value)>) {
+        let sub = SubScription {
+            on_added,
+            on_changed,
+            on_removed,
+        };
+        self.subs.lock().unwrap().insert(name, sub);
     }
 
     pub fn call(&mut self, method: &str, params: Value, timeout: Duration) -> Result<Option<Value>, DDPError> {
