@@ -16,9 +16,9 @@ use crate::error::DDPError;
 
 
 struct SubScription {
-    on_added: Option<fn(Value)>,
-    on_changed: Option<fn(Value)>,
-    on_removed: Option<fn(Value)>,
+    on_added: Option<fn(String, String, Option<Value>)>,
+    on_changed: Option<fn(String, String, Option<Value>, Option<Value>)>,
+    on_removed: Option<fn(String, String)>,
 }
 
 pub struct DDPClient {
@@ -31,6 +31,7 @@ pub struct DDPClient {
     updated_event: Arc<Event<ServerMessage>>,
     session: String,
     method_id: u32,
+    sub_id: u32,
     alive: Arc<AtomicBool>,
     subs: Arc<Mutex<HashMap<String, SubScription>>>,
 }
@@ -58,14 +59,19 @@ impl DDPClient {
         let pong_event = Arc::new(Event::<ServerMessage>::new());
         let pong_event_alive = pong_event.clone();
         let sub_event = Arc::new(Event::<ServerMessage>::new());
-        let sub_event_clone = sub_event.clone();
         let result_event = Arc::new(Event::<ServerMessage>::new());
         let updated_event = Arc::new(Event::<ServerMessage>::new());
         let updated_event_clone = updated_event.clone();
         let subs = Arc::new(Mutex::new(HashMap::new()));
         let send_th = DDPClient::ws_send_loop(ws_rx, sender);
         threads.push(send_th);
-        let recv_th = DDPClient::ws_recv_loop(receiver, ws_tx.clone(), conn_event.clone(), result_event.clone(), pong_event.clone(), subs.clone());
+        let recv_th = DDPClient::ws_recv_loop(receiver,
+                                              ws_tx.clone(),
+                                              conn_event.clone(),
+                                              result_event.clone(),
+                                              pong_event.clone(),
+                                              sub_event.clone(),
+                                              subs.clone());
         threads.push(recv_th);
         let is_alive = Arc::new(AtomicBool::new(true));
         let mut client = Self {
@@ -73,11 +79,12 @@ impl DDPClient {
             threads: threads,
             conn_event: conn_event,
             pong_event: pong_event,
-            sub_event: sub_event_clone,
+            sub_event: sub_event,
             result_event: result_event,
             updated_event: updated_event_clone,
             session: "".to_string(),
             method_id: 0,
+            sub_id: 0,
             alive: is_alive.clone(),
             subs: subs,
         };
@@ -156,7 +163,8 @@ impl DDPClient {
                     conn_event: Arc<Event<ServerMessage>>,
                     result_event: Arc<Event<ServerMessage>>,
                     pong_event: Arc<Event<ServerMessage>>,
-                    subs: Arc<Mutex<SubScription>>) -> JoinHandle<()> {
+                    sub_event: Arc<Event<ServerMessage>>,
+                    subs: Arc<Mutex<HashMap<String, SubScription>>>) -> JoinHandle<()> {
         thread::spawn(move || {
             for message in ws_recver.incoming_messages() {
                 let message = match message {
@@ -203,6 +211,39 @@ impl DDPClient {
                         pong_event.notify(id.to_string(), ServerMessage::Pong {id: Some(id)});
 
                     }
+                    ServerMessage::NoSub {id, error} => {
+                        sub_event.notify(id.to_string(), ServerMessage::NoSub {id, error});
+                    }
+                    ServerMessage::Added {collection, id, fields} => {
+                        let sub = &subs.lock().unwrap()[&collection];
+                        let on_added = sub.on_added.clone();
+                        if let Some(on_added) = on_added {
+                            on_added(collection, id, fields);
+                        }
+                    }
+                    ServerMessage::Changed {collection, id, fields, cleared} => {
+                        let sub = &subs.lock().unwrap()[&collection];
+                        let on_changed = sub.on_changed.clone();
+                        if let Some(on_changed) = on_changed {
+                            on_changed(collection, id, fields, cleared);
+                        }
+                    }
+                    ServerMessage::Removed {collection, id} => {
+                        let sub = &subs.lock().unwrap()[&collection];
+                        let on_removed = sub.on_removed.clone();
+                        if let Some(on_removed) = on_removed {
+                            on_removed(collection, id);
+                        }
+                    }
+                    ServerMessage::Ready {subs} => {
+                        for id in subs.iter() {
+                            sub_event.notify(id.clone(), ServerMessage::Ready {subs: vec![id.clone()]});
+                        }
+
+                    }
+                    ServerMessage::Updated {methods} => {
+
+                    }
                     _ => {
                         println!("invalid message: {:?}", message);
                     }
@@ -230,13 +271,34 @@ impl DDPClient {
         })
     }
 
-    pub fn subscribe(&mut self, name: String, on_added: Option<fn(Value)>, on_changed: Option<fn(Value)>, on_removed: Option<fn(Value)>) {
+    pub fn subscribe(&mut self, name: String, timeout: Duration,
+                     on_added: Option<fn(String, String, Option<Value>)>,
+                     on_changed: Option<fn(String, String, Option<Value>, Option<Value>)>,
+                     on_removed: Option<fn(String, String)>) -> Result<(), DDPError> {
+        let sub_id = self.sub_id.to_string();
+        self.sub_id += 1;
+        let message = ClientMessage::Sub {
+            id: sub_id.clone(),
+            name: name.clone(),
+            params: Option::None,
+        };
         let sub = SubScription {
             on_added,
             on_changed,
             on_removed,
         };
         self.subs.lock().unwrap().insert(name, sub);
+        self.send_message(ws::OwnedMessage::Text(serde_json::to_string(&message).unwrap()))?;
+        let response = self.sub_event.wait_timeout(&sub_id[..], timeout)?;
+        match response {
+            ServerMessage::Ready {subs} => {
+                return Ok(());
+            }
+            ServerMessage::NoSub {id, error} => {
+                return Err(DDPError::NoSub(serde_json::to_string(&error).unwrap()));
+            }
+            _ => {return Ok(());}
+        }
     }
 
     pub fn call(&mut self, method: &str, params: Value, timeout: Duration) -> Result<Option<Value>, DDPError> {

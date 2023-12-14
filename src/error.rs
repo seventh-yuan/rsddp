@@ -8,5 +8,6 @@ pub enum DDPError {
     ConnFailed(String),
     NotMatching(String),
     MethodError(String),
+    NoSub(String),
     Other(String),
 }
