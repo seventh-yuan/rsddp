@@ -16,6 +16,7 @@ use crate::error::DDPError;
 
 
 struct SubScription {
+    id: String,
     on_added: Option<fn(String, String, Option<Value>)>,
     on_changed: Option<fn(String, String, Option<Value>, Option<Value>)>,
     on_removed: Option<fn(String, String)>,
@@ -271,7 +272,7 @@ impl DDPClient {
         })
     }
 
-    pub fn subscribe(&mut self, name: String, timeout: Duration,
+    pub fn subscribe(&mut self, collection: &str, timeout: Duration,
                      on_added: Option<fn(String, String, Option<Value>)>,
                      on_changed: Option<fn(String, String, Option<Value>, Option<Value>)>,
                      on_removed: Option<fn(String, String)>) -> Result<(), DDPError> {
@@ -279,15 +280,16 @@ impl DDPClient {
         self.sub_id += 1;
         let message = ClientMessage::Sub {
             id: sub_id.clone(),
-            name: name.clone(),
+            name: collection.to_string(),
             params: Option::None,
         };
         let sub = SubScription {
+            id: sub_id.clone(),
             on_added,
             on_changed,
             on_removed,
         };
-        self.subs.lock().unwrap().insert(name, sub);
+        self.subs.lock().unwrap().insert(collection.to_string(), sub);
         self.send_message(ws::OwnedMessage::Text(serde_json::to_string(&message).unwrap()))?;
         let response = self.sub_event.wait_timeout(&sub_id[..], timeout)?;
         match response {
@@ -299,6 +301,18 @@ impl DDPClient {
             }
             _ => {return Ok(());}
         }
+    }
+
+    pub fn unsubscribe(&mut self, collection: &str) {
+        if let Some(sub) = self.subs.lock().unwrap().remove(collection) {
+            if sub.id == collection {
+                let message = ClientMessage::UnSub {
+                    id: sub.id,
+                };
+                self.send_message(ws::OwnedMessage::Text(serde_json::to_string(&message).unwrap())).unwrap();
+            }
+        }
+
     }
 
     pub fn call(&mut self, method: &str, params: Value, timeout: Duration) -> Result<Option<Value>, DDPError> {
