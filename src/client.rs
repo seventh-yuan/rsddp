@@ -4,11 +4,11 @@ use std::sync::mpsc;
 use websocket::stream::sync::TcpStream;
 use std::thread::JoinHandle;
 use std::vec::Vec;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Condvar};
 use std::time::{Duration, Instant};
 use std::thread::{self, spawn, sleep};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use serde_json::Value;
 use crate::event::Event;
 use crate::message::{ServerMessage, ClientMessage};
@@ -20,6 +20,42 @@ struct SubScription {
     on_added: Option<fn(String, String, Option<Value>)>,
     on_changed: Option<fn(String, String, Option<Value>, Option<Value>)>,
     on_removed: Option<fn(String, String)>,
+    queue: Arc<Mutex<VecDeque<Box<dyn Fn() + Send>>>>,
+    cond: Arc<Condvar>,
+    th: JoinHandle<()>,
+}
+
+impl SubScription {
+    fn add(&mut self, collection: String, id: String, fields: Option<Value>) {
+        let mut queue = self.queue.lock().unwrap();
+        let on_added = self.on_added.clone();
+        let collection = Arc::new(collection);
+        let id = Arc::new(id);
+        let fields = Arc::new(fields);
+        queue.push_back(Box::new(move || {
+            if let Some(on_added) = on_added {
+                let collection = (*collection).clone();
+                let id = (*id).clone();
+                let fields = (*fields).clone();
+                on_added(collection, id, fields);
+            }
+        }) );
+        self.cond.notify_all();
+    }
+
+    fn handle_process(queue: Arc<Mutex<VecDeque<Box<dyn Fn() + Send>>>>, cond: Arc<Condvar>) -> JoinHandle<()> {
+        spawn(move || {
+            loop {
+                let mut msgs = queue.lock().unwrap();
+                while msgs.len() <= 0 {
+                    msgs = cond.wait(msgs).unwrap();
+                }
+                if let Some(handle) = msgs.pop_back() {
+                    handle();
+                }
+            }
+        })
+    }
 }
 
 pub struct DDPClient {
@@ -283,11 +319,17 @@ impl DDPClient {
             name: collection.to_string(),
             params: Option::None,
         };
+        let sub_queue = Arc::new(Mutex::new(VecDeque::new()));
+        let sub_cond = Arc::new(Condvar::new());
+        let sub_th = SubScription::handle_process(sub_queue.clone(), sub_cond.clone());
         let sub = SubScription {
             id: sub_id.clone(),
             on_added,
             on_changed,
             on_removed,
+            cond: sub_cond,
+            queue: sub_queue,
+            th: sub_th,
         };
         self.subs.lock().unwrap().insert(collection.to_string(), sub);
         self.send_message(ws::OwnedMessage::Text(serde_json::to_string(&message).unwrap()))?;
