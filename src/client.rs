@@ -70,7 +70,7 @@ pub struct DDPClient {
 impl Drop for DDPClient {
     fn drop(&mut self) {
         self.alive.store(false, Ordering::SeqCst);
-        let _ = self.send_message(ws::OwnedMessage::Close(None));
+        let _ = self.send_ws_message(ws::OwnedMessage::Close(None));
         while let Some(th) = self.threads.pop() {
             th.join().unwrap();
         }
@@ -163,11 +163,15 @@ impl DDPClient {
         return Ok(client);
     }
 
-    fn send_message(&self, msg: ws::OwnedMessage) -> Result<(), DDPError> {
+    fn send_ws_message(&self, msg: ws::OwnedMessage) -> Result<(), DDPError> {
         match self.ws_tx.send(msg) {
             Ok(()) => Ok(()),
             Err(_) => Err(DDPError::SendFailed("send message failed".to_string()))
         }
+    }
+
+    fn send_message(&self, msg: String) -> Result<(), DDPError> {
+        return self.send_ws_message(ws::OwnedMessage::Text(msg));
     }
 
     fn ws_send_loop(ws_rx_chan: mpsc::Receiver<ws::OwnedMessage>, mut ws_sender: ws::sender::Writer<TcpStream>) -> JoinHandle<()> {
@@ -331,7 +335,7 @@ impl DDPClient {
             th: sub_th,
         };
         self.subs.lock().unwrap().insert(collection.to_string(), sub);
-        self.send_message(ws::OwnedMessage::Text(serde_json::to_string(&message).unwrap()))?;
+        self.send_message(serde_json::to_string(&message).unwrap())?;
         let response = self.sub_event.wait(&sub_id[..], timeout)?;
         match response {
             ServerMessage::Ready {subs: _} => {
@@ -350,7 +354,7 @@ impl DDPClient {
                 let message = ClientMessage::UnSub {
                     id: sub.id,
                 };
-                self.send_message(ws::OwnedMessage::Text(serde_json::to_string(&message).unwrap())).unwrap();
+                self.send_message(serde_json::to_string(&message).unwrap()).unwrap();
             }
         }
 
@@ -365,7 +369,7 @@ impl DDPClient {
             id: method_id.clone(),
             randomSeed: Some(Value::String("0".to_string())),
         };
-        self.send_message(ws::OwnedMessage::Text(serde_json::to_string(&message).unwrap()))?;
+        self.send_message(serde_json::to_string(&message).unwrap())?;
         let msg = self.result_event.wait(&method_id[..], timeout)?;
         let msg = match msg {
             ServerMessage::Result{id: _, error, result} => {
