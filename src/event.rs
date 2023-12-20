@@ -17,21 +17,7 @@ impl<T> Event<T> {
         }
     }
 
-    pub fn wait(&self, id: &str) -> Result<T, DDPError> {
-        let mut msgs = self.msgs.lock().unwrap();
-        while msgs.len() <= 0 {
-            msgs = self.cond.wait(msgs).unwrap();
-        }
-        let msg = match msgs.remove(id) {
-            Some(msg) => msg,
-            None => {
-                return Err(DDPError::Other("invalid event found".to_string()));
-            }
-        };
-        return Ok(msg);
-    }
-
-    pub fn wait_timeout(&self, id: &str, timeout: Duration) ->Result<T, DDPError> {
+    pub fn wait(&self, id: &str, timeout: Duration) ->Result<T, DDPError> {
         let mut msgs = self.msgs.lock().unwrap();
         let ts = Instant::now();
         while msgs.len() <= 0 {

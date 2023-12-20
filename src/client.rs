@@ -5,7 +5,7 @@ use websocket::stream::sync::TcpStream;
 use std::thread::JoinHandle;
 use std::vec::Vec;
 use std::sync::{Arc, Mutex, Condvar};
-use std::time::{Duration, Instant};
+use std::time::{Duration};
 use std::thread::{self, spawn};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::{HashMap, VecDeque};
@@ -70,7 +70,7 @@ pub struct DDPClient {
 impl Drop for DDPClient {
     fn drop(&mut self) {
         self.alive.store(false, Ordering::SeqCst);
-        self.send_message(ws::OwnedMessage::Close(None));
+        let _ = self.send_message(ws::OwnedMessage::Close(None));
         while let Some(th) = self.threads.pop() {
             th.join().unwrap();
         }
@@ -80,7 +80,7 @@ impl Drop for DDPClient {
 impl DDPClient {
     pub fn connect(endpoint: &str, timeout: Duration) -> Result<Self, DDPError> {
         let client = ClientBuilder::new(endpoint).unwrap().connect_insecure().unwrap();
-        let (mut receiver, mut sender) = client.split().unwrap();
+        let (receiver, sender) = client.split().unwrap();
 
         let (ws_tx, ws_rx) = mpsc::channel();
 
@@ -134,14 +134,14 @@ impl DDPClient {
                 return Err(DDPError::NotMatching("no matching version".to_string()));
             }
             client.ws_tx.send(ws::OwnedMessage::Text(serde_json::to_string(&connect_message).unwrap())).unwrap();
-            let message = client.conn_event.wait_timeout("", timeout)?;
+            let message = client.conn_event.wait("", timeout)?;
             match message {
                 ServerMessage::Connected {session} => {
                     client.session = session;
                     break;
                 }
                 ServerMessage::Failed {version} => {
-                    if let Some(index) = ddp_versions.iter().position(|ver| *ver == version) {
+                    if let Some(_index) = ddp_versions.iter().position(|ver| *ver == version) {
                         connect_message = ClientMessage::Connect {
                             session: "".to_string(),
                             version: version,
@@ -195,7 +195,7 @@ impl DDPClient {
     }
 
     fn ws_recv_loop(mut ws_recver: ws::receiver::Reader<TcpStream>,
-                    mut ws_tx_chan: mpsc::Sender<ws::OwnedMessage>,
+                    ws_tx_chan: mpsc::Sender<ws::OwnedMessage>,
                     conn_event: Arc<Event<ServerMessage>>,
                     result_event: Arc<Event<ServerMessage>>,
                     pong_event: Arc<Event<ServerMessage>>,
@@ -277,7 +277,7 @@ impl DDPClient {
                         }
 
                     }
-                    ServerMessage::Updated {methods} => {
+                    ServerMessage::Updated {methods: _} => {
 
                     }
                     _ => {
@@ -291,7 +291,7 @@ impl DDPClient {
 
     fn alive_loop(alive: Arc<AtomicBool>, ws_tx_chan: mpsc::Sender<ws::OwnedMessage>, pong_event: Arc<Event<ServerMessage>>) -> JoinHandle<()> {
         thread::spawn(move || {
-            let mut ping_id = 0;
+            let ping_id = 0;
             loop {
                 if !alive.load(Ordering::SeqCst) {
                     return;
@@ -301,7 +301,7 @@ impl DDPClient {
                     alive.store(false, Ordering::SeqCst);
                     return;
                 }
-                let _ = pong_event.wait_timeout(&ping_id.to_string()[..], Duration::from_millis(1000)).unwrap();
+                let _ = pong_event.wait(&ping_id.to_string()[..], Duration::from_millis(1000)).unwrap();
                 thread::sleep(Duration::from_millis(1000));
             }
         })
@@ -332,12 +332,12 @@ impl DDPClient {
         };
         self.subs.lock().unwrap().insert(collection.to_string(), sub);
         self.send_message(ws::OwnedMessage::Text(serde_json::to_string(&message).unwrap()))?;
-        let response = self.sub_event.wait_timeout(&sub_id[..], timeout)?;
+        let response = self.sub_event.wait(&sub_id[..], timeout)?;
         match response {
-            ServerMessage::Ready {subs} => {
+            ServerMessage::Ready {subs: _} => {
                 return Ok(());
             }
-            ServerMessage::NoSub {id, error} => {
+            ServerMessage::NoSub {id: _, error} => {
                 return Err(DDPError::NoSub(serde_json::to_string(&error).unwrap()));
             }
             _ => {return Ok(());}
@@ -366,9 +366,9 @@ impl DDPClient {
             randomSeed: Some(Value::String("0".to_string())),
         };
         self.send_message(ws::OwnedMessage::Text(serde_json::to_string(&message).unwrap()))?;
-        let msg = self.result_event.wait_timeout(&method_id[..], timeout)?;
+        let msg = self.result_event.wait(&method_id[..], timeout)?;
         let msg = match msg {
-            ServerMessage::Result{id, error, result} => {
+            ServerMessage::Result{id: _, error, result} => {
                 if let Some(error) = error {
                     return Err(DDPError::MethodError(serde_json::to_string(&error).unwrap()));
                 }
