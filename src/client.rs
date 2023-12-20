@@ -6,7 +6,7 @@ use std::thread::JoinHandle;
 use std::vec::Vec;
 use std::sync::{Arc, Mutex, Condvar};
 use std::time::{Duration, Instant};
-use std::thread::{self, spawn, sleep};
+use std::thread::{self, spawn};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::{HashMap, VecDeque};
 use serde_json::Value;
@@ -20,7 +20,7 @@ struct SubScription {
     on_added: Option<fn(String, String, Option<Value>)>,
     on_changed: Option<fn(String, String, Option<Value>, Option<Value>)>,
     on_removed: Option<fn(String, String)>,
-    queue: Arc<Mutex<VecDeque<Box<dyn Fn() + Send>>>>,
+    queue: Arc<Mutex<VecDeque<Box<dyn FnOnce() + Send>>>>,
     cond: Arc<Condvar>,
     th: JoinHandle<()>,
 }
@@ -29,21 +29,15 @@ impl SubScription {
     fn add(&mut self, collection: String, id: String, fields: Option<Value>) {
         let mut queue = self.queue.lock().unwrap();
         let on_added = self.on_added.clone();
-        let collection = Arc::new(collection);
-        let id = Arc::new(id);
-        let fields = Arc::new(fields);
         queue.push_back(Box::new(move || {
             if let Some(on_added) = on_added {
-                let collection = (*collection).clone();
-                let id = (*id).clone();
-                let fields = (*fields).clone();
                 on_added(collection, id, fields);
             }
         }) );
         self.cond.notify_all();
     }
 
-    fn handle_process(queue: Arc<Mutex<VecDeque<Box<dyn Fn() + Send>>>>, cond: Arc<Condvar>) -> JoinHandle<()> {
+    fn handle_process(queue: Arc<Mutex<VecDeque<Box<dyn FnOnce() + Send>>>>, cond: Arc<Condvar>) -> JoinHandle<()> {
         spawn(move || {
             loop {
                 let mut msgs = queue.lock().unwrap();
@@ -147,11 +141,16 @@ impl DDPClient {
                     break;
                 }
                 ServerMessage::Failed {version} => {
-                    connect_message = ClientMessage::Connect {
-                        session: "".to_string(),
-                        version: ddp_versions[v_index].clone(),
-                        support: ddp_versions.clone(),
-                    };
+                    if let Some(index) = ddp_versions.iter().position(|ver| *ver == version) {
+                        connect_message = ClientMessage::Connect {
+                            session: "".to_string(),
+                            version: version,
+                            support: ddp_versions.clone(),
+                        };
+                    } else {
+                        return Err(DDPError::NotSupport("no match version found".to_string()));
+                    }
+
                 }
                 _ => {
                     panic!("invalid message");

@@ -9,5 +9,6 @@ pub enum DDPError {
     NotMatching(String),
     MethodError(String),
     NoSub(String),
+    NotSupport(String),
     Other(String),
 }
