@@ -14,42 +14,30 @@ use crate::message::{ServerMessage, ClientMessage};
 use crate::error::DDPError;
 
 
-// struct SubScription {
-//     id: String,
-//     on_added: Option<fn(String, String, Option<Value>)>,
-//     on_changed: Option<fn(String, String, Option<Value>, Option<Value>)>,
-//     on_removed: Option<fn(String, String)>,
-//     queue: Arc<Mutex<VecDeque<Box<dyn FnOnce() + Send>>>>,
-//     cond: Arc<Condvar>,
-//     th: JoinHandle<()>,
-// }
+struct SubScription {
+    id: String,
+    sender: mpsc::Sender<ServerMessage>,
+    th: JoinHandle<()>,
+}
 
-// impl SubScription {
-//     fn add(&mut self, collection: String, id: String, fields: Option<Value>) {
-//         let mut queue = self.queue.lock().unwrap();
-//         let on_added = self.on_added.clone();
-//         queue.push_back(Box::new(move || {
-//             if let Some(on_added) = on_added {
-//                 on_added(collection, id, fields);
-//             }
-//         }) );
-//         self.cond.notify_all();
-//     }
+impl SubScription {
 
-//     fn handle_process(queue: Arc<Mutex<VecDeque<Box<dyn FnOnce() + Send>>>>, cond: Arc<Condvar>) -> JoinHandle<()> {
-//         spawn(move || {
-//             loop {
-//                 let mut msgs = queue.lock().unwrap();
-//                 while msgs.len() <= 0 {
-//                     msgs = cond.wait(msgs).unwrap();
-//                 }
-//                 if let Some(handle) = msgs.pop_back() {
-//                     handle();
-//                 }
-//             }
-//         })
-//     }
-// }
+    pub fn new(id: String, handle: fn(ServerMessage)) -> Self {
+        let (sender, receiver) = mpsc::channel();
+        let th = thread::spawn(move || {
+            loop {
+                let msg = receiver.recv().unwrap();
+                handle(msg);
+            }
+        });
+
+        Self {
+            id: id,
+            sender: sender,
+            th: th,
+        }
+    }
+}
 
 pub struct DDPClient {
     wstx_chan: mpsc::Sender<ws::OwnedMessage>,
@@ -57,14 +45,14 @@ pub struct DDPClient {
     threads: Vec<JoinHandle<()>>,
     session: String,
     ids: Arc<AtomicU32>,
-    alive: Arc<AtomicBool>
+    alive: Arc<AtomicBool>,
+    subs: Arc<Mutex<HashMap<String, SubScription>>>,
 }
 
 impl Drop for DDPClient {
     fn drop(&mut self) {
         self.alive.store(false, Ordering::SeqCst);
         self.wstx_chan.send(ws::OwnedMessage::Close(None));
-        println!("---------------------");
         while let Some(th) = self.threads.pop() {
             th.join().unwrap();
         }
@@ -87,6 +75,7 @@ impl DDPClient {
             wstx_chan: wstx_chan,
             ids: ids,
             alive: Arc::new(AtomicBool::new(true)),
+            subs: Arc::new(Mutex::new(HashMap::new())),
         };
 
         let send_th = DDPClient::ws_send_loop(wsrx_chan, ws_sender);
@@ -157,7 +146,6 @@ impl DDPClient {
                 match message {
                     ws::OwnedMessage::Close(_) => {
                         let _ = ws_sender.send_message(&message);
-                        println!("----exit send loop");
                         return;
                     }
                     _ => {
@@ -171,6 +159,7 @@ impl DDPClient {
     fn ws_recv_loop(&self, mut ws_recver: ws::receiver::Reader<TcpStream>) -> JoinHandle<()> {
         let pending = self.pending.clone();
         let wstx_chan = self.wstx_chan.clone();
+        let subs_table = self.subs.clone();
         thread::spawn(move || {
             for message in ws_recver.incoming_messages() {
                 let message = match message {
@@ -183,7 +172,6 @@ impl DDPClient {
                 let message: ServerMessage = match message {
                     ws::OwnedMessage::Text(m) => serde_json::from_str(&m[..]).unwrap(),
                     ws::OwnedMessage::Close(_) => {
-                        println!("-----------------------recv loop");
                         return;
                     }
                     ws::OwnedMessage::Ping(data) => {
@@ -214,39 +202,47 @@ impl DDPClient {
                             resp_sender.send(ServerMessage::Pong {id});
                         }
                     }
-                    // ServerMessage::NoSub {id, error} => {
-                    //     sub_event.notify(id.to_string(), ServerMessage::NoSub {id, error});
-                    // }
-                    // ServerMessage::Added {collection, id, fields} => {
-                    //     let sub = &subs.lock().unwrap()[&collection];
-                    //     let on_added = sub.on_added.clone();
-                    //     if let Some(on_added) = on_added {
-                    //         on_added(collection, id, fields);
-                    //     }
-                    // }
-                    // ServerMessage::Changed {collection, id, fields, cleared} => {
-                    //     let sub = &subs.lock().unwrap()[&collection];
-                    //     let on_changed = sub.on_changed.clone();
-                    //     if let Some(on_changed) = on_changed {
-                    //         on_changed(collection, id, fields, cleared);
-                    //     }
-                    // }
-                    // ServerMessage::Removed {collection, id} => {
-                    //     let sub = &subs.lock().unwrap()[&collection];
-                    //     let on_removed = sub.on_removed.clone();
-                    //     if let Some(on_removed) = on_removed {
-                    //         on_removed(collection, id);
-                    //     }
-                    // }
-                    // ServerMessage::Ready {subs} => {
-                    //     for id in subs.iter() {
-                    //         sub_event.notify(id.clone(), ServerMessage::Ready {subs: vec![id.clone()]});
-                    //     }
+                    ServerMessage::NoSub {id, error} => {
+                        let sub = &subs_table.lock().unwrap()[&id];
+                        sub.sender.send(ServerMessage::NoSub {id, error});
+                    }
+                    ServerMessage::Added {collection, id, fields} => {
+                        let subs = &subs_table.lock().unwrap();
+                        for (_, sub) in subs.iter() {
+                            if sub.id == id {
+                                sub.sender.send(ServerMessage::Added {collection, id, fields});
+                                break;
+                            }
+                        }
+                        
+                    }
+                    ServerMessage::Changed {collection, id, fields, cleared} => {
+                        let subs = &subs_table.lock().unwrap();
+                        for (_, sub) in subs.iter() {
+                            if sub.id == id {
+                                sub.sender.send(ServerMessage::Changed {collection, id, fields, cleared});
+                                break;
+                            }
+                        }
+                    }
+                    ServerMessage::Removed {collection, id} => {
+                        let subs = &subs_table.lock().unwrap();
+                        for (_, sub) in subs.iter() {
+                            if sub.id == id {
+                                sub.sender.send(ServerMessage::Removed {collection, id});
+                                break;
+                            }
+                        } 
+                    }
+                    ServerMessage::Ready {subs} => {
+                        for id in subs.iter() {
+                            let sub = &subs_table.lock().unwrap()[id];
+                            sub.sender.send(ServerMessage::Ready {subs: vec![id.clone()]});
+                        }
+                    }
+                    ServerMessage::Updated {methods: _} => {
 
-                    // }
-                    // ServerMessage::Updated {methods: _} => {
-
-                    // }
+                    }
                     _ => {
                         println!("invalid message: {:?}", message);
                     }
@@ -263,7 +259,6 @@ impl DDPClient {
         thread::spawn(move || {
             loop {
                 if !alive.load(Ordering::SeqCst) {
-                    println!("--------------exit alive");
                     return;
                 }
                 
@@ -315,6 +310,23 @@ impl DDPClient {
             return Ok(resp);
         }
         return Err(DDPError::InvalidMessage("Invalid ddp message".to_string()));
+    }
+
+    pub fn subscribe(&mut self, id: String,
+                     collection: String,
+                     handle: fn(ServerMessage)) -> Result<(), DDPError> {
+        let sub = SubScription::new(id.clone(), handle);
+        let mut subs = self.subs.lock().unwrap();
+        subs.insert(id.clone(), sub);
+        let message = ClientMessage::Sub {id, name: collection, params: None};
+        let message = serde_json::to_string(&message).unwrap();
+        self.wstx_chan.send(ws::OwnedMessage::Text(message));
+        return Ok(());
+    }
+
+    pub fn unsubscribe(&mut self, id: &String) {
+        let mut subs = self.subs.lock().unwrap();
+        subs.remove(id);
     }
 
     pub fn is_alive(&self) -> bool {
