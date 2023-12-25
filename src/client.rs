@@ -4,9 +4,9 @@ use std::sync::mpsc;
 use websocket::stream::sync::TcpStream;
 use std::thread::JoinHandle;
 use std::vec::Vec;
-use std::sync::{Arc, Mutex, Condvar};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration};
-use std::thread::{self, spawn};
+use std::thread;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, AtomicBool, Ordering};
 use serde_json::Value;
@@ -60,8 +60,10 @@ impl Drop for DDPClient {
 }
 
 impl DDPClient {
-    pub fn connect(endpoint: &str, timeout: Duration) -> Result<Self, DDPError> {
-        let client = ClientBuilder::new(endpoint).unwrap().connect_insecure().unwrap();
+    pub fn connect(endpoint: &str) -> Result<Self, DDPError> {
+        let client = ClientBuilder::new(endpoint)
+                .map_err(|_| DDPError::UrlError("invalid endpoint".to_string()))?
+                .connect_insecure().map_err(|_| DDPError::WSConnError("connect failed.".to_string()))?;
         let (mut ws_receiver, mut ws_sender) = client.split().unwrap();
         let ws_session = DDPClient::connect_with_ws(&mut ws_sender, &mut ws_receiver)?;
         let (wstx_chan, wsrx_chan) = mpsc::channel();
@@ -82,8 +84,7 @@ impl DDPClient {
         client.threads.push(send_th);
         let recv_th = DDPClient::ws_recv_loop(&client, ws_receiver);
         client.threads.push(recv_th);
-        let alive_th = DDPClient::alive_loop(&client);
-        client.threads.push(alive_th);
+        let _ = DDPClient::alive_loop(&client);
 
         return Ok(client);
     }
