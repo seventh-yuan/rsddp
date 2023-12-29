@@ -28,7 +28,7 @@ pub enum ClientMessage {
         method: String,
         params: Option<Value>,
         id: String,
-        randomSeed: Option<Value>
+        random_seed: Option<Value>
     },
 
 }

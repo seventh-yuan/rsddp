@@ -7,7 +7,7 @@ use std::vec::Vec;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration};
 use std::thread;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicBool, Ordering};
 use serde_json::Value;
 use crate::message::{ServerMessage, ClientMessage};
@@ -17,14 +17,13 @@ use crate::error::DDPError;
 struct SubScription {
     id: String,
     sender: mpsc::Sender<ServerMessage>,
-    th: JoinHandle<()>,
 }
 
 impl SubScription {
 
     pub fn new(id: String, handle: fn(ServerMessage)) -> Self {
         let (sender, receiver) = mpsc::channel();
-        let th = thread::spawn(move || {
+        thread::spawn(move || {
             loop {
                 let msg = receiver.recv().unwrap();
                 handle(msg);
@@ -34,7 +33,6 @@ impl SubScription {
         Self {
             id: id,
             sender: sender,
-            th: th,
         }
     }
 }
@@ -52,7 +50,7 @@ pub struct DDPClient {
 impl Drop for DDPClient {
     fn drop(&mut self) {
         self.alive.store(false, Ordering::SeqCst);
-        self.wstx_chan.send(ws::OwnedMessage::Close(None));
+        let _ = self.wstx_chan.send(ws::OwnedMessage::Close(None));
         while let Some(th) = self.threads.pop() {
             th.join().unwrap();
         }
@@ -62,14 +60,14 @@ impl Drop for DDPClient {
 impl DDPClient {
     pub fn connect(endpoint: &str) -> Result<Self, DDPError> {
         let client = ClientBuilder::new(endpoint)
-                .map_err(|_| DDPError::UrlError("invalid endpoint".to_string()))?
-                .connect_insecure().map_err(|_| DDPError::WSConnError("connect failed.".to_string()))?;
+                .map_err(|e| DDPError::UrlError(e.to_string()))?
+                .connect_insecure().map_err(|e| DDPError::ConnectError(e.to_string()))?;
         let (mut ws_receiver, mut ws_sender) = client.split().unwrap();
         let ws_session = DDPClient::connect_with_ws(&mut ws_sender, &mut ws_receiver)?;
         let (wstx_chan, wsrx_chan) = mpsc::channel();
         let pending : Arc<Mutex<HashMap<String, oneshot::Sender<ServerMessage>>>> = Arc::new(Mutex::new(HashMap::new()));
         let ids: Arc<AtomicU32> = Arc::new(AtomicU32::new(0));
-        let mut threads = Vec::new();
+        let threads = Vec::new();
         let mut client = Self {
             pending: pending,
             threads: threads,
@@ -102,12 +100,12 @@ impl DDPClient {
         'loop1: loop {
             v_index += 1;
             if v_index >= ddp_versions.len() {
-                return Err(DDPError::NotMatching("no matching version".to_string()));
+                return Err(DDPError::ConnectError("the server and client are not compatible".to_string()));
             }
             let message = ws::OwnedMessage::Text(serde_json::to_string(&connect_message).unwrap());
-            ws_sender.send_message(&message).unwrap();
-            if let ws::OwnedMessage::Text(message) = ws_receiver.recv_message().unwrap() {
-                let message = serde_json::from_str(&message[..]).unwrap();
+            ws_sender.send_message(&message).map_err(|e| DDPError::SendError(e.to_string()))?;
+            if let ws::OwnedMessage::Text(message) = ws_receiver.recv_message().map_err(|e| DDPError::RecvError(e.to_string()))? {
+                let message = serde_json::from_str(&message[..]).map_err(|e| DDPError::MessageError(e.to_string()))?;
                 match message {
                     ServerMessage::Connected {session} => {
                         ws_session = session;
@@ -121,12 +119,12 @@ impl DDPClient {
                                 support: ddp_versions.clone(),
                             };
                         } else {
-                            return Err(DDPError::NotSupport("no match version found".to_string()));
+                            return Err(DDPError::ConnectError(format!("server does not support current client, suggested protocol version is {}", version)));
                         }
     
                     }
                     _ => {
-                        panic!("invalid message");
+                        return Err(DDPError::MessageError(format!("invalid message: {}", serde_json::to_string(&message).unwrap())));
                     }
                 }
             }
@@ -194,24 +192,24 @@ impl DDPClient {
                     ServerMessage::Result {id, error, result} => {
                         let mut pending = pending.lock().unwrap();
                         if let Some(resp_sender) = pending.remove(&id) {
-                            resp_sender.send(ServerMessage::Result {id, error, result});
+                            resp_sender.send(ServerMessage::Result {id, error, result}).unwrap();
                         }
                     }
                     ServerMessage::Pong {id} => {
                         let mut pending = pending.lock().unwrap();
                         if let Some(resp_sender) = pending.remove(&(id.clone().unwrap())) {
-                            resp_sender.send(ServerMessage::Pong {id});
+                            resp_sender.send(ServerMessage::Pong {id}).unwrap();
                         }
                     }
                     ServerMessage::NoSub {id, error} => {
                         let sub = &subs_table.lock().unwrap()[&id];
-                        sub.sender.send(ServerMessage::NoSub {id, error});
+                        sub.sender.send(ServerMessage::NoSub {id, error}).unwrap();
                     }
                     ServerMessage::Added {collection, id, fields} => {
                         let subs = &subs_table.lock().unwrap();
                         for (_, sub) in subs.iter() {
                             if sub.id == id {
-                                sub.sender.send(ServerMessage::Added {collection, id, fields});
+                                sub.sender.send(ServerMessage::Added {collection, id, fields}).unwrap();
                                 break;
                             }
                         }
@@ -221,7 +219,7 @@ impl DDPClient {
                         let subs = &subs_table.lock().unwrap();
                         for (_, sub) in subs.iter() {
                             if sub.id == id {
-                                sub.sender.send(ServerMessage::Changed {collection, id, fields, cleared});
+                                sub.sender.send(ServerMessage::Changed {collection, id, fields, cleared}).unwrap();
                                 break;
                             }
                         }
@@ -230,7 +228,7 @@ impl DDPClient {
                         let subs = &subs_table.lock().unwrap();
                         for (_, sub) in subs.iter() {
                             if sub.id == id {
-                                sub.sender.send(ServerMessage::Removed {collection, id});
+                                sub.sender.send(ServerMessage::Removed {collection, id}).unwrap();
                                 break;
                             }
                         } 
@@ -238,7 +236,7 @@ impl DDPClient {
                     ServerMessage::Ready {subs} => {
                         for id in subs.iter() {
                             let sub = &subs_table.lock().unwrap()[id];
-                            sub.sender.send(ServerMessage::Ready {subs: vec![id.clone()]});
+                            sub.sender.send(ServerMessage::Ready {subs: vec![id.clone()]}).unwrap();
                         }
                     }
                     ServerMessage::Updated {methods: _} => {
@@ -268,12 +266,17 @@ impl DDPClient {
                 let (resp_sender, resp_receiver) = oneshot::channel();
                 {
                     let mut pending = pending.lock().unwrap();
-                    pending.insert(ping_id, resp_sender);
+                    pending.insert(ping_id.clone(), resp_sender);
                 }
                 let message = ws::OwnedMessage::Text(serde_json::to_string(&ping_msg).unwrap());
-                wstx_chan.send(message);
+                wstx_chan.send(message).unwrap();
                 if let Ok(resp) = resp_receiver.recv_timeout(Duration::from_millis(1000)) {
-
+                    if let ServerMessage::Pong {id} = resp {
+                        if id != Some(ping_id) {
+                            alive.store(false, Ordering::SeqCst);
+                            return;
+                        }
+                    }
                 }
                 thread::sleep(Duration::from_millis(1000));
             }
@@ -286,7 +289,7 @@ impl DDPClient {
             method: method.to_string(),
             params: Some(params),
             id: method_id.clone(),
-            randomSeed: Some(Value::String("0".to_string())),
+            random_seed: None,
         };
         let (resp_sender, resp_receiver) = oneshot::channel();
         {
@@ -295,7 +298,7 @@ impl DDPClient {
         }
         let message = serde_json::to_string(&message).unwrap();
         let message = ws::OwnedMessage::Text(message);
-        self.wstx_chan.send(message);
+        self.wstx_chan.send(message).unwrap();
         if let Ok(resp) = resp_receiver.recv_timeout(timeout) {
             let resp = match resp {
                 ServerMessage::Result {id: _, error, result} => {
@@ -305,12 +308,12 @@ impl DDPClient {
                     result
                 },
                 _ => {
-                    return Err(DDPError::InvalidMessage("Invalid ddp message".to_string()));
+                    return Err(DDPError::MessageError("Invalid ddp message".to_string()));
                 }
             };
             return Ok(resp);
         }
-        return Err(DDPError::InvalidMessage("Invalid ddp message".to_string()));
+        return Err(DDPError::MessageError("Invalid ddp message".to_string()));
     }
 
     pub fn subscribe(&mut self, id: String,
@@ -321,7 +324,7 @@ impl DDPClient {
         subs.insert(id.clone(), sub);
         let message = ClientMessage::Sub {id, name: collection, params: None};
         let message = serde_json::to_string(&message).unwrap();
-        self.wstx_chan.send(ws::OwnedMessage::Text(message));
+        self.wstx_chan.send(ws::OwnedMessage::Text(message)).unwrap();
         return Ok(());
     }
 
