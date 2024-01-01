@@ -14,6 +14,7 @@ use crate::message::{ServerMessage, ClientMessage};
 use crate::error::DDPError;
 
 
+/// Used to handle subscription message.
 struct SubScription {
     id: String,
     sender: mpsc::Sender<ServerMessage>,
@@ -37,6 +38,12 @@ impl SubScription {
     }
 }
 
+/// Create DDP client to communicate with Meteor DDP server.
+///
+/// ```rust,no_run
+/// use rsddp::client::DDPClient;
+/// let client = DDPClient::connect("ws://127.0.0.1:18001", Duration::from_millis(1000)).unwrap();
+/// ```
 pub struct DDPClient {
     wstx_chan: mpsc::Sender<ws::OwnedMessage>,
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<ServerMessage>>>>,
@@ -58,6 +65,7 @@ impl Drop for DDPClient {
 }
 
 impl DDPClient {
+    /// Connect server with endpoint string.
     pub fn connect(endpoint: &str) -> Result<Self, DDPError> {
         let client = ClientBuilder::new(endpoint)
                 .map_err(|e| DDPError::UrlError(e.to_string()))?
@@ -283,6 +291,17 @@ impl DDPClient {
         })
     }
 
+    /// call remote method in server.
+    ///
+    /// ```rust,no_run
+    /// use serde_json::json;
+    /// use std::time::Duration;
+    /// use websocket::client::DDPClient;
+    ///
+    /// let client = DDPClient::connect("ws://127.0.0.1:8000").unwrap();
+    /// let result = client.call("hello", json!(["hello", "world"]), Duration::from_millis(1000)).unwrap();
+    /// println!("{:?}", result);
+    /// ```
     pub fn call(&mut self, method: &str, params: Value, timeout: Duration) -> Result<Option<Value>, DDPError> {
         let method_id: String = self.ids.fetch_add(1, Ordering::SeqCst).to_string();
         let message = ClientMessage::Method {
@@ -316,6 +335,20 @@ impl DDPClient {
         return Err(DDPError::MessageError("Invalid ddp message".to_string()));
     }
 
+    /// Sub messages in server side.
+    ///
+    /// ```rust,no_run
+    /// use serde_json::json;
+    /// use std::time::Duration;
+    /// use websocket::client::DDPClient;
+    /// use rsddp::message::ServerMessage;
+    ///
+    /// fn on_sub_data(message: ServerMessage) {
+    ///    println!("on_added: {}", serde_json::to_string(&message).unwrap());
+    /// }
+    /// let client = DDPClient::connect("ws://127.0.0.1:8000").unwrap();
+    /// let _  = client.subscribe("1".to_string(), "topic".to_string(), on_sub_data);
+    /// ```
     pub fn subscribe(&mut self, id: String,
                      collection: String,
                      handle: fn(ServerMessage)) -> Result<(), DDPError> {
@@ -328,6 +361,11 @@ impl DDPClient {
         return Ok(());
     }
 
+    /// You need unsubscribe message which you have subscribed with `subscribe` method
+    ///
+    /// ```rust
+    /// client.unsubscribe("1".to_string());
+    /// ```
     pub fn unsubscribe(&mut self, id: &String) {
         let mut subs = self.subs.lock().unwrap();
         subs.remove(id);

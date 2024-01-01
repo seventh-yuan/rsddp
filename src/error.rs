@@ -1,5 +1,5 @@
 
-#[derive(Debug)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum DDPError {
     UrlError(String),
     ConnectError(String),
